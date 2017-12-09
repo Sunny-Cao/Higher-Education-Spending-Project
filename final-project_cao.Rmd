@@ -1,0 +1,512 @@
+---
+title: "Final Project"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(haven)
+library(readxl)
+library(forcats)
+library(ModelMetrics)
+library(RColorBrewer)
+library(plm)
+library(ggplot2)
+library(tidyr)
+library(gridExtra)
+library(car)
+library(knitr)
+```
+
+Introduction
+
+For the past decade, U.S. colleges and universities have been increasing tuition costs at an average rate of 3.2% per year beyond inflation (College Board, 2017), causing a heavier financial burden for Americans than ever before. However, education spending doesn’t rise at the same pace. According to Delta Cost Project data, from 2003 to 2013, the growth rates of median instructional spending per full-time equivalent (FTE) student were much lower than a number of other expenses, such as academic support, student services, and institutional supports, regardless of institutional types.Considering the limited public funding and multiple possible institutional spending pattern, this project is trying to explore if any particular spending strategies would benefit institutions best regarding to its degree production.
+
+Data
+
+This project uses data from the Delta Cost Project Database. Considering the different focuses of different type of institutions, I excluded for-profit and two-year sectors in this project. Also, based on statistical analysis concerns, institutions with 5 or less bachelor degrees per year as well as institutions with less than 100 undergraduates enrolled in total are excluded in the analysis. All institutions with more bachelor degrees produced than the undergraduate enrollment are excluded in the analysis.
+
+## Load Data
+
+```{r load data}
+#setwd("./final_project")
+
+#The website stock the data in .zip file, so have to download it first. Currently in the final_project folder.
+if(file.exists("delta.Rdata")==FALSE){
+  if(file.exists("./Data/Delta_database_87_2015_CSV/delta_public_release_00_15.csv")==FALSE){
+    download.file("http://www.deltacostproject.org/sites/default/files/database/Delta_database_87_2015_CSV.zip","./Data/Delta_database_87_2015_CSV.zip")
+    unzip(Delta_database_87_2015_CSV.zip)
+  }else{
+  }
+  #This dataset is in csv. format. However, it is actually using tab as a deliminator. There are 16-year data here. So   I think I will keep with it for now instead of loading more previous data.
+  delta<-read_delim("./Data/Delta_database_87_2015_CSV/delta_public_release_00_15.csv",delim="\t")
+  save(delta,file="delta.Rdata")
+}
+  
+load("delta.Rdata")
+#View(delta)
+
+#Save another version of usable variable. I has a dictionary Excel file in local downloaded from Delta Cost Project webpage.
+if(file.exists("delta_dict")==FALSE){
+  if(file.exists("./Data/Delta_Data_Dictionary_2000_2015.xlsx")==FALSE){
+    download.file("http://www.deltacostproject.org/sites/default/files/database/Delta_Data_Dictionary_2000_2015.xlsx","./Data/Delta_Data_Dictionary_2000_2015.xlsx")
+  }else{
+  }
+  delta_dict<-read_xlsx("./Data/Delta_Data_Dictionary_2000_2015.xlsx",col_names=TRUE)
+  save(delta_dict,file="delta_dict.Rdata")
+}
+
+load("delta_dict.Rdata")
+#View(delta_dict)
+
+#Select useful variable
+delta_4<-delta[c(2,4,6,8:10,13,15,26,29,31,44,49,83,141,144,147,150,153,156,165,199,235,251,260,261,275,276,281,282,297,314,325:328,332,340,342,388)]
+
+#Filter out 4-year institutions
+delta_4<-delta_4%>%filter(sector_revised>=1,sector_revised<=3)
+
+#Filter out institutions with more than 5 bachelor degrees produced
+delta_4<-delta_4%>%filter(bachelordegrees>5)
+
+#Filter out for-profit sectors
+delta_4<-delta_4%>%filter(control!=3)
+
+#Filter out institutions with less than 100 undergraduates in total
+delta_4<-delta_4%>%filter(fall_total_undergrad>=100)
+
+#Filter out special focus institutions
+delta_4<-delta_4%>%filter(carnegie2010>8,carnegie2010<24)
+
+#Filter out strange cases
+delta_4<-delta_4%>%filter(fall_total_undergrad>bachelordegrees)
+
+save(delta_4,file="delta_4.Rdata")
+load("delta_4.Rdata")
+#View(delta_4)
+```
+
+For the purpose of this project, several new variables are generated. Instead of using actual expenses for each category, share of different expenses are calculated. This aligns with the purpose of finding the most efficient spending strategy. Overall revenue will be included as a control variable in the final regression model. Previous research shows that selectivity is positively related with institutional performance, so it is also calculated to be included in the models. Insitution sizes are calculated according the categories in IPEDS database.
+
+```{r generate new IVs}
+#Share of different expenses
+delta_4<-delta_4%>%mutate(p_instruct=instruction01/eandg01_sum*100)
+delta_4<-delta_4%>%mutate(p_acadsupp=acadsupp01/eandg01_sum*100)
+delta_4<-delta_4%>%mutate(p_studserv=studserv01/eandg01_sum*100)
+delta_4<-delta_4%>%mutate(p_instsupp=instsupp01/eandg01_sum*100)
+
+#Selectivity
+delta_4<-delta_4%>%mutate(select=admitcount/applicantcount*100)
+
+#Institutional size
+delta_4<-delta_4%>%mutate(
+            instsize = ifelse(total_enrollment %in% 0:999, 1,
+                            ifelse(total_enrollment %in% 1000:4999, 2,
+                                ifelse(total_enrollment %in% 5000:9999, 3,
+                                    ifelse(total_enrollment %in% 10000:19999, 4,
+                                           ifelse(total_enrollment >19999, 5,99))))))
+#No missing value found in institutional size
+
+#Recode Carnegie2010
+#1 Associate's Colleges, 2 Research/Doctorate-granting Universities, 3 Master’s Colleges and Universities, 4 Baccalaureate Colleges
+delta_4<-delta_4%>%mutate(
+            insttype = ifelse(carnegie2010 %in% 9:14, 1,
+                            ifelse(carnegie2010 %in% 15:17, 2,
+                                ifelse(carnegie2010 %in% 18:20, 3, 4))))
+```
+
+Descriptive Statistics
+
+```{r Descriptive Stats}
+#Number of Institutions by Type and Year
+table<-table(delta_4$academicyear,delta_4$control)
+kable(table,row.names = TRUE,col.names = c("Public","Private"))
+
+table<-table(delta_4$instsize,delta_4$control)
+my_row<-c("0-999", "1000-4999","5000-9999","10000-19999","20000+")
+row.names(table)<-my_row
+kable(table,row.names = TRUE,col.names = c("Public","Private"))
+
+table<-table(delta_4$insttype,delta_4$control)
+my_row<-c("Associate's Colleges", "Research/Doctorate-granting Universities","Master’s Colleges and Universities","Baccalaureate Colleges")
+row.names(table)<-my_row
+kable(table,row.names = TRUE ,col.names = c("Public","Private"))
+```
+
+Associate's Colleges include institutions where all degrees are at the associate's level, or where bachelor's degrees account for less than 10 percent of all undergraduate degrees. Excludes Special Focus Institutions and Tribal Colleges.
+
+Research/Doctorate-granting Universities includes institutions that award at least 20 doctoral degrees per year (excluding doctoral-level degrees that qualify recipients for entry into professional practice, such as the JD, MD, PharmD, DPT, etc.) Excludes Special Focus Institutions and Tribal Colleges.
+
+Master’s Colleges and Universities includes institutions that award at least 50 master's degrees per year. Excludes Special Focus Institutions and Tribal Colleges.
+
+Baccalaureate Colleges  includes institutions where baccalaureate degrees represent at least 10 percent of all undergraduate degrees and that award fewer than 50 master's degrees or fewer than 20 doctoral degrees per year. Excludes Special Focus Institutions and Tribal Colleges.
+
+```{r Descriptive Stats Cond1}
+#Degree Production and Enrollment by Year
+dv_sum<-delta_4%>%group_by(academicyear,control)%>%summarize(degree=mean(bachelordegrees),enroll=mean(fall_total_undergrad))
+
+dv_sum <- gather(dv_sum,type,nstudent,degree:enroll, factor_key=TRUE)
+dv_sum$type1 <- paste0(dv_sum$type,dv_sum$control)
+
+gg<-ggplot(dv_sum,aes(x=academicyear,y=nstudent,color=factor(type1,labels = c("Bachelor Degree Produced in Public Institutions","Bachelor Degree Produced in Private Institutions", "Total Undergraduates Enrolled in Public Institutions","Total Undergraduates Enrolled in Private Institutions"))))
+gg<-gg+geom_line()+geom_point()
+gg<-gg+xlab("Academic Year")+ylab("Number of Students")
+gg<-gg+labs(color="Type")+theme(legend.position="bottom",legend.direction="vertical")
+gg
+
+#Plot Degree Production by Year
+gg<-ggplot(delta_4, aes(group=academicyear,x=academicyear, y=log(bachelordegrees+1)))+geom_boxplot()
+gg<-gg+xlab("Academic Year")+ylab("Log of Bachelor Degree Produced")
+gg
+
+#Different Expenses by Year
+iv_sum<-delta_4%>%group_by(academicyear,control)%>%summarize(instruct=mean(p_instruct,na.rm=TRUE),acadsupp=mean(p_acadsupp,na.rm=TRUE),studserv=mean(p_studserv,na.rm=TRUE),instsupp=mean(p_instsupp,na.rm=TRUE))
+
+iv_sum <- gather(iv_sum,type,percent,instruct:instsupp, factor_key=TRUE)
+iv_sum$type1 <- paste0(iv_sum$type,dv_sum$control)
+
+if(FALSE){
+gg<-ggplot(iv_sum,aes(x=academicyear,y=percent,color=factor(type1,labels = c("Academic Support in Public Institutions","Academic Support in Private Institutions", "Instruction in Public Institutions","Instruction in Private Institutions","Institutional Support in Public Institutions","Institutional Support in Private Institutions", "Student Service in Public Institutions","Student Service in Private Institutions"))))
+gg<-gg+geom_line()+geom_point()
+gg<-gg+xlab("Academic Year")+ylab("Percent of Total Expenses")
+gg<-gg+labs(color="Type of Expense")
+gg
+}
+
+inst_control <- list("1"="Public","2"="Private")
+
+control_labeller <- function(variable,value){
+  return(inst_control[value])
+}
+
+gg<-ggplot(iv_sum,aes(x=academicyear,y=percent,color=factor(type,labels = c("Instruction","Academic Support","Student Service","Institutional Support"))))
+gg<-gg+geom_line()+geom_point()
+gg<-gg+facet_wrap(~control,labeller =control_labeller)
+gg<-gg+xlab("Academic Year")+ylab("Percent of Total Expenses")
+gg<-gg+labs(color="Type of Expense")
+gg
+```
+
+Instruction - A functional expense category that includes expenses of the colleges, schools, departments, and other instructional divisions of the institution and expenses for departmental research and public service that are not separately budgeted. Includes general academic instruction, occupational and vocational instruction, community education, preparatory and adult basic education, and regular, special, and extension sessions. Also includes expenses for both credit and non-credit activities. Excludes expenses for academic administration where the primary function is administration (e.g., academic deans). Information technology expenses related to instructional activities are included if the institution separately budgets and expenses information technology resources (otherwise these expenses are included in academic support).  Operations and maintenance and interest amounts attributed to the instruction function have been subtracted from the total instructional expenditure amount at FASB reporting institutions. Operations and maintenance amounts (and interest in the aligned form beginning in 2009) attributed to the instruction function have been subtracted from the total amount at public Aligned form reporting institutions.
+
+Academic support - A functional expense category that includes expenses of activities and services that support the institution's primary missions of instruction, research, and public service. It includes the retention, preservation, and display of educational materials (for example, libraries, museums, and galleries); organized activities that provide support services to the academic functions of the institution (such as a demonstration school associated with a college of education or veterinary and dental clinics if their primary purpose is to support the instructional program); media such as audiovisual services; academic administration (including academic deans but not department chairpersons); and formally organized and separately budgeted academic personnel development and course and curriculum development expenses. Also included are information technology expenses related to academic support activities; if an institution does not separately budget and expense information technology resources, the costs associated with the three primary programs will be applied to this function and the remainder to institutional support. Operations and maintenance and interest amounts attributed to the academic support function have been subtracted from the total academic support expenditure amount at FASB reporting institutions. Operations and maintenance amounts (and interest in the aligned form beginning in 2009) attributed to the academic support function have been subtracted from the total academic support expenditure amount at public Aligned Form reporting institutions.
+
+Student services - A functional expense category that includes expenses for admissions, registrar activities, and activities whose primary purpose is to contribute to students emotional and physical well-being and to their intellectual, cultural, and social development outside the context of the formal instructional program. Examples include student activities, cultural events, student newspapers, intramural athletics, student organizations, supplemental instruction outside the normal administration, and student records. Intercollegiate athletics and student health services may also be included except when operated as self - supporting auxiliary enterprises. Also may include information technology expenses related to student service activities if the institution separately budgets and expenses information technology resources(otherwise these expenses are included in institutional support.) Operations and maintenance and interest amounts attributed to the student sevices function have been subtracted from the total student services expenditure amount at FASB reporting institutions. Operations and maintenance (and interest in the aligned form beginning in 2009) amounts attributed to the student services function have been subtracted from the total student services expenditure amount at public Aligned Form reporting institutions.
+
+Institutional support - A functional expense category that includes expenses for the day-to-day operational support of the institution. Includes expenses for general administrative services, central executive-level activities concerned with management and long range planning, legal and fiscal operations, space management, employee personnel and records, logistical services such as purchasing and printing, and public relations and development. Also includes information technology expenses related to institutional support activities. Operations and maintenance and interest amounts attributed to the institutional support function have been subtracted from the total institutional support expenditure amount at FASB reporting institutions. Operations and maintenance amounts (and interest in the aligned form beginning in 2009) attributed to the institutional support function have been subtracted from the total institutional support expenditure amount at public Aligned Form reporting institutions.
+
+```{r Descriptive Stats Cond2}
+#Variation of Different Expenses by Year
+g1<-ggplot(delta_4, aes(group=academicyear,x=academicyear, y=p_instruct))+geom_boxplot()
+g1<-g1+xlab("Academic Year")+ylab("Percent of All Expenses Spent on Instruction")
+#g1
+
+g2<-ggplot(delta_4, aes(group=academicyear,x=academicyear, y=p_acadsupp))+geom_boxplot()
+g2<-g2+xlab("Academic Year")+ylab("Percent of All Expenses Spent on Academic Support")
+#g2
+
+g3<-ggplot(delta_4, aes(group=academicyear,x=academicyear, y=p_studserv))+geom_boxplot()
+g3<-g3+xlab("Academic Year")+ylab("Percent of All Expenses Spent on Student Service")
+#g3
+
+g4<-ggplot(delta_4, aes(group=academicyear,x=academicyear, y=p_instsupp))+geom_boxplot()
+g4<-g4+xlab("Academic Year")+ylab("Percent of All Expenses Spent on Institutional Support")
+#g4
+
+gg<-grid.arrange(g1,g2,g3,g4,nrow=2)
+gg
+```
+
+Using one-year sample from 2015 to explore possible models
+
+```{r data for 2015 predict DV using conditional means}
+#One-year sample from 2015
+delta_4_2015<-delta_4%>%filter(academicyear=="2015")
+
+gg<-ggplot(delta_4_2015,aes(x=log(bachelordegrees+1)))
+gg<-gg+geom_histogram(binwidth = 0.1,fill="lightblue")
+gg
+
+#Use instructional expense as a predictor.Use institutional type as a grouping variable. 1 stands for public institutions. 2 stands for private non-profit institutions. Use institutional sizes as a control variable.
+delta_sum<-delta_4_2015%>%mutate(instruct_r=round(p_instruct))%>%group_by(instruct_r,control,instsize)%>%summarize(dpr_m=mean(bachelordegrees))
+
+## PLot it using a scatter plot
+inst_control <- list("1"="Public","2"="Private")
+
+control_labeller <- function(variable,value){
+  return(inst_control[value])
+}
+
+gg<-ggplot(delta_sum,aes(x=instruct_r,y=log(dpr_m+1),color=factor(instsize,labels = c("0-999", "1000-4999","5000-9999","10000-19999","20000+"))))
+gg<-gg+geom_point()
+gg<-gg+facet_wrap(~control,labeller =control_labeller)
+gg<-gg+geom_smooth(method=lm)
+gg<-gg+xlab("Instructional Expense as a Percent of Total Educational Expense")+ylab("Log of Bachelor Degree Produced")
+gg<-gg+labs(color="Size of Total Enrollment")
+gg
+
+
+#Use instructional expense as a predictor.Use institutional type as a grouping variable. 1 stands for public institutions. 2 stands for private non-profit institutions. Use institution type as a control variable.
+delta_sum<-delta_4_2015%>%mutate(instruct_r=round(p_instruct))%>%group_by(instruct_r,control,insttype)%>%summarize(dpr_m=mean(bachelordegrees))
+
+## PLot it using a scatter plot
+gg<-ggplot(delta_sum,aes(x=instruct_r,y=log(dpr_m+1),color=factor(insttype,labels = c("Associate's Colleges", "Research/Doctorate-granting Universities","Master’s Colleges and Universities","Baccalaureate Colleges"))))
+gg<-gg+geom_point()
+gg<-gg+facet_wrap(~control,labeller =control_labeller)
+gg<-gg+geom_smooth(method=lm)
+gg<-gg+xlab("Instructional Expense as a Percent of Total Educational Expense")+ylab("Log of Bachelor Degree Produced")
+gg<-gg+labs(color="Type of Institution")
+gg
+```
+
+```{r one-year regression model}
+#A regression model for 2015 (for the purpose of deciding which IVs to include)
+mod1<-lm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(control)+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(fall_total_undergrad+1)+
+           log(tot_rev_wo_auxother_sum+1),
+        data=delta_4_2015,
+        na.action = na.exclude) 
+
+summary(mod1)
+vif(mod1)
+
+delta_4_2015<-delta_4_2015%>%mutate(pred1=predict(mod1)) #predict using data in memory
+
+compare_data<-data.frame(delta_4_2015$bachelordegrees,delta_4_2015$pred1)%>%filter(is.na(delta_4_2015.pred1)==FALSE)
+names(compare_data)<-c("bachelordegrees","pred1")
+
+rmse_1<-with(compare_data,exp(rmse(log(bachelordegrees+1),pred1)))
+rmse_1
+ 
+#Test this model on 2014 data
+delta_4_2014<-delta_4%>%filter(academicyear=="2014")
+pred_2014<-predict(mod1,
+                   newdata=delta_4_2014,
+                   interval="prediction",
+                    se.fit=TRUE
+                   )
+
+delta_4_2014<-data.frame(delta_4_2014,pred_2014$fit) 
+compare_data<-data.frame(delta_4_2014$bachelordegrees,delta_4_2014$fit)%>%filter(is.na(delta_4_2014.fit)==FALSE)
+names(compare_data)<-c("bachelordegrees","fit")
+
+rmse_2<-with(compare_data,exp(rmse(log(bachelordegrees+1),fit)))
+rmse_2
+```
+
+Cross validation not working
+```{r cross validation}
+if(FALSE){
+cv<-delta_4%>%
+  select(bachelordegrees,p_instruct,p_acadsupp,p_studserv,p_instsupp,control,hbcu,insttype,select,tot_rev_wo_auxother_sum,fall_total_undergrad)%>%
+  mutate_all(funs(as.numeric))%>%tbl_df()
+
+## Define the model
+mod1_formula<-formula("log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(control)+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1)")
+
+df_cv<-cv%>%
+  crossv_kfold(20)
+df_cv
+
+df_cv<-cv%>%
+  crossv_mc(n=1000,test=.2)
+df_cv
+
+mod1_rmse_cv<-df_cv %>% 
+  mutate(train = map(train, as_tibble)) %>% ## Convert to tibbles
+  mutate(model = map(train, ~ lm(mod1_formula, data = .)))%>%
+  mutate(rmse = map2_dbl(model, test, rmse))%>% 
+  select(.id, rmse) ## pull just id and rmse 
+
+mod1_rmse_cv
+}
+```
+
+Models
+
+```{r a pooled model}
+ols <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(control)+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1),
+           model="pooling",
+           data=delta_4)
+summary(ols)
+```
+
+```{r a fix-effect model}
+#Fixed effect model for all institutions
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(control)+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+```
+
+```{r categorized fixed effect models}
+#BY INSTITUTION TYPE
+#Fixed effect model for all public institutions
+delta_4_public<-delta_4%>%filter(control==1)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_public, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#Fixed effect model for all private institutions
+delta_4_private<-delta_4%>%filter(control==2)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_private, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#BY INSTITUTION SIZE
+#Fixed effect model for all large institutions
+delta_4_large<-delta_4%>%filter(instsize==5)
+#None of these institutions is hbcu
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_large, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#Fixed effect model for all small institutions
+delta_4_small<-delta_4%>%filter(instsize==1)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_small, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#Fixed effect model for all median institutions
+delta_4_med<-delta_4%>%filter(instsize>1,instsize<5)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           as.factor(insttype)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_med, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#BY INSTITUTION LEVEL
+#Fixed effect model for all baccalaureate institutions
+delta_4_ba<-delta_4%>%filter(insttype==4)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_ba, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#Fixed effect model for all master institutions
+delta_4_ma<-delta_4%>%filter(insttype==3)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_ma, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+
+#Fixed effect model for all phd institutions
+delta_4_phd<-delta_4%>%filter(insttype==2)
+fixed <- plm(log(bachelordegrees+1)~p_instruct+
+           p_acadsupp+
+           p_studserv+
+           p_instsupp+
+           as.factor(hbcu)+
+           select+
+           log(tot_rev_wo_auxother_sum+1)+
+           log(fall_total_undergrad+1), 
+           data=delta_4_phd, 
+           model="within",
+           index=c("unitid","academicyear"))
+summary(fixed)
+```
+
+Key Takeways
+
+1. Institutional spending patterns do relate to its degree production.
+2. The relationships vary across institutions with different focuses, sizes, and types.
+3. It is unclear whether it is just a concurrent phenomenon or a casual effect. If it is a casual effect, it needs further research to unreveal the mechanism underlying as well as the cause of variation among different institutions.
